@@ -1,0 +1,9 @@
+cmake-build-debug/
+*.o
+*.so
+*.a
+lib/
+bin/
+pyvenv.cfg
+.idea/
+
