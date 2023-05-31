@@ -141,12 +141,24 @@ static PyTypeObject pg_select_iterType = {
         nullptr
 };
 
+/* Generating random string */
+
+std::string random_string()
+{
+    std::string str("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz");
+    std::random_device rd;
+    std::mt19937 generator(rd());
+    std::shuffle(str.begin(), str.end(), generator);
+    return "a" + str.substr(0, 32);
+}
+
 /* Create iterator method */
 
 PyObject *cursor(PyObject *self, PyObject *args, PyObject *kwargs) {
     pg_select_iter *p;
     PGresult *res;
-    std::string cursor = "DECLARE my_portal CURSOR FOR ", end_cursor = ";";
+    cursor_name = random_string();
+    std::string cursor = "DECLARE " + cursor_name + " CURSOR FOR ", end_cursor = ";";
     char *connection, *sql, *format = (char *) "tab";
     static char *kwlist[] = {
             (char *) "connection",
