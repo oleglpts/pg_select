@@ -213,7 +213,7 @@ PyObject *cursor(PyObject *self, PyObject *args, PyObject *kwargs) {
 
 /* Methods definition structure*/
 
-static PyMethodDef PGSelectMethods[] = {
+static PyMethodDef PG_SelectMethods[] = {
         {
             "cursor",                                                                           // method name
             (PyCFunction)cursor,                                                                // implementation
@@ -230,7 +230,7 @@ static struct PyModuleDef pg_select = {
         "pg_select",                                                                            // module name
         "usage: import pg_select\n\n for record in pg_select.cursor(...):\n    # action\n",     // documentation
         -1,                                                                                     // keeps globals
-        PGSelectMethods                                                                         // methods
+        PG_SelectMethods                                                                         // methods
 };
 
 /* Module init function */
