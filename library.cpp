@@ -1,7 +1,5 @@
 #include "library.h"
 
-#include <iostream>
-
 /* Iterator status structure */
 
 typedef struct {
@@ -12,6 +10,13 @@ typedef struct {
     int nFields;                                                                                // fields counter
     PGresult *res;                                                                              // select result
     PyObject *it;                                                                               // for garbage collector
+    PyObject *tmp;                                                                              // result
+    pg_conn *conn;                                                                              // db connection
+    int iteration;                                                                              // cursor iteration step
+    bool column_names;                                                                          // display column names
+    bool debug;                                                                                 // debug mode
+    char *cursor_name;                                                                          // cursor name
+    char *format;                                                                               // format (TODO)
 } pg_select_iter;
 
 /* Iterator */
@@ -47,14 +52,16 @@ static void pg_select_iter_dealloc(pg_select_iter *self)
 
 void clear_cursor(pg_select_iter *p, bool stopIteration=true) {
     PQclear(p->res);
-    command = close_command + cursor_name;
+    std::string cursor_name(p->cursor_name);
+    std::string command = "CLOSE " + cursor_name;
     debug_print("__next__: command execution " + command)
-    PQclear(PQexec(conn, command.c_str()));
-    PQclear(PQexec(conn, "END"));
+    PQclear(PQexec(p->conn, command.c_str()));
+    PQclear(PQexec(p->conn, "END"));
     debug_print("__next__: transaction ended")
-    PQfinish(conn);
+    PQfinish(p->conn);
     if(stopIteration)
         PyErr_SetNone(PyExc_StopIteration);
+    delete [] p->cursor_name;
     debug_print("__next__: connection cleared")
 }
 
@@ -69,28 +76,31 @@ PyObject* cursor_next(PyObject *self)
             clear_cursor(p);
             return (PyObject*) nullptr;
         }
-        command = fetch_command + std::to_string(iteration) + " " + cursor_name;
+        std::string cursor_name(p->cursor_name);
+        std::string command = "FETCH " + std::to_string(p->iteration) + " " + cursor_name;
         debug_print("__next__: command execution " + command)
-        p->res = PQexec(conn, command.c_str());
+        if(p->res)
+            PQclear(p->res);
+        p->res = PQexec(p->conn, command.c_str());
         if (PQresultStatus(p->res) != PGRES_TUPLES_OK)
         {
-            PyErr_SetString(PyExc_ConnectionError, PQerrorMessage(conn));
+            PyErr_SetString(PyExc_ConnectionError, PQerrorMessage(p->conn));
             clear_cursor(p, false);
             return (PyObject*) nullptr;
         }
         p->m = PQntuples(p->res);
-        if(p->m < iteration) {
+        if(p->m < p->iteration) {
             debug_print("__next__: set finalization flag")
             p->stop = true;
         }
         if(p->i < 0) {
             p->nFields = PQnfields(p->res);
-            if(column_names) {
+            if(p->column_names) {
                 p->i = 0;
-                PyObject *tmp = PyList_New(0);
+                p->tmp = PyList_New(p->nFields);
                 for (int i = 0; i < p->nFields; i++)
-                    PyList_Append(tmp, PyUnicode_FromString(PQfname(p->res, i)));
-                return tmp;
+                    PyList_SetItem(p->tmp, i, PyUnicode_FromString(PQfname(p->res, i)));
+                return p->tmp;
             }
         }
         p->i = 0;
@@ -101,11 +111,11 @@ PyObject* cursor_next(PyObject *self)
             return (PyObject*) nullptr;
         }
     }
-    PyObject *tmp = PyList_New(0);
+    p->tmp = PyList_New(p->nFields);
     for (int i = 0; i < p->nFields; i++)
-        PyList_Append(tmp, PyUnicode_FromString(PQgetvalue(p->res, p->i, i)));
+        PyList_SetItem(p->tmp, i, PyUnicode_FromString(PQgetvalue(p->res, p->i, i)));
     p->i++;
-    return tmp;
+    return p->tmp;
 }
 
 /* Python object for module */
@@ -157,9 +167,7 @@ std::string random_string()
 PyObject *cursor(PyObject *self, PyObject *args, PyObject *kwargs) {
     pg_select_iter *p;
     PGresult *res;
-    cursor_name = random_string();
-    std::string cursor = "DECLARE " + cursor_name + " CURSOR FOR ", end_cursor = ";";
-    char *connection, *sql, *format = (char *) "tab";
+    char *connection = nullptr, *sql = nullptr;
     static char *kwlist[] = {
             (char *) "connection",
             (char *) "sql",
@@ -169,44 +177,55 @@ PyObject *cursor(PyObject *self, PyObject *args, PyObject *kwargs) {
             (char *) "debug",
             nullptr
     };
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ss|slbb", kwlist, &connection, &sql, &format,
-                                     &iteration, &column_names, &debug))
+    p = PyObject_GC_New(pg_select_iter, &pg_select_iterType);
+    if (!p) return nullptr;
+    p->iteration = 20000;
+    p->column_names = true;
+    p->debug = false;
+    std::string random_str = random_string();
+    p->format = nullptr;
+    p->cursor_name = new char[random_str.length() + 1];
+    strcpy(p->cursor_name, random_str.c_str());
+    std::string cursor_name(p->cursor_name);
+    std::string cursor = "DECLARE " + cursor_name + " CURSOR FOR ", end_cursor = ";";
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ss|slbb", kwlist, &connection, &sql, &p->format,
+                                     &p->iteration, &p->column_names, &p->debug))
         return nullptr;
-    conn = PQconnectdb(connection);
-    if (PQstatus(conn) != CONNECTION_OK) {
-        PyErr_SetString(PyExc_ConnectionError, PQerrorMessage(conn));
+    p->conn = PQconnectdb(connection);
+    if (PQstatus(p->conn) != CONNECTION_OK) {
+        PyErr_SetString(PyExc_ConnectionError, PQerrorMessage(p->conn));
         return (PyObject*) nullptr;
     }
     debug_print("__iter__: connected to database")
-    res = PQexec(conn, "BEGIN");
+    res = PQexec(p->conn, "BEGIN");
     if (PQresultStatus(res) != PGRES_COMMAND_OK) {
-        PyErr_SetString(PyExc_ConnectionError, PQerrorMessage(conn));
+        PyErr_SetString(PyExc_ConnectionError, PQerrorMessage(p->conn));
         PQclear(res);
         return (PyObject*) nullptr;
     }
     debug_print("__iter__: transaction started")
     PQclear(res);
     std::string s(sql);
-    command = cursor + s + end_cursor;
+    std::string command = cursor + s + end_cursor;
     debug_print("__iter__: command execution " + command)
-    res = PQexec(conn, command.c_str());
+    res = PQexec(p->conn, command.c_str());
     if (PQresultStatus(res) != PGRES_COMMAND_OK)
     {
-        PyErr_SetString(PyExc_ConnectionError, PQerrorMessage(conn));
+        PyErr_SetString(PyExc_ConnectionError, PQerrorMessage(p->conn));
         PQclear(res);
         return (PyObject*) nullptr;
     }
     PQclear(res);
-    p = PyObject_GC_New(pg_select_iter, &pg_select_iterType);
-    if (!p) return nullptr;
     p->it = nullptr;
+    p->tmp = nullptr;
     PyObject_GC_Track(p);
     if (!PyObject_Init((PyObject *)p, &pg_select_iterType)) {
         Py_DECREF(p);
         return nullptr;
     }
-    p->m = iteration;
+    p->m = p->iteration;
     p->i = -1;
+    p->res = nullptr;
     p->stop = false;
     return (PyObject *)p;
 }
